@@ -6,7 +6,30 @@
 /** File visibility. `public` files are reachable through the disk's configured public base URL. */
 export type Visibility = 'private' | 'public';
 
-/** Extra options for `put`. */
+/**
+ * Provider-native options bag, forwarded verbatim to the driver's SDK. This is
+ * storagekit's escape hatch: anything the framework does not model (S3
+ * `StorageClass`, `ServerSideEncryption`, Azure `tier`, GCS `predefinedAcl`, …)
+ * travels here and is typed by the kit per driver.
+ */
+export type NativeOptions = Readonly<Record<string, unknown>>;
+
+/** Byte range for a partial read (`offset` + optional `length`). */
+export interface ByteRange {
+  readonly offset: number;
+  readonly length?: number;
+}
+
+/** Multipart/chunked upload tuning (drivers that support it). */
+export interface MultipartOptions {
+  readonly enabled?: boolean;
+  /** Part size in bytes. */
+  readonly partSize?: number;
+  /** Maximum number of concurrent part transfers. */
+  readonly concurrency?: number;
+}
+
+/** Extra options for `put` (storagekit's upload options). */
 export interface PutOptions {
   /**
    * Visibility for this write. Local disks keep every file inside their own
@@ -15,16 +38,109 @@ export interface PutOptions {
    * "promoted" to public by a call-site flag).
    */
   readonly visibility?: Visibility;
+  /** MIME type recorded with the object (defaults to the extension's type). */
+  readonly contentType?: string;
+  /** User metadata stored alongside the object. */
+  readonly metadata?: Readonly<Record<string, string>>;
+  /** `Cache-Control` header for downloads (CDN behaviour on cloud drivers). */
+  readonly cacheControl?: string;
+  /** `Content-Disposition` header (e.g. `attachment; filename="report.pdf"`). */
+  readonly contentDisposition?: string;
+  /** `Content-Encoding` header (e.g. `gzip`). */
+  readonly contentEncoding?: string;
+  /** `false` fails with `STORAGE_FILE_EXISTS` when the key is already present. */
+  readonly overwrite?: boolean;
+  /** Multipart upload tuning; ignored by drivers without multipart support. */
+  readonly multipart?: MultipartOptions;
+  /** Abort the upload. */
+  readonly signal?: AbortSignal;
+  /** Provider-native upload options (see {@link NativeOptions}). */
+  readonly native?: NativeOptions;
 }
 
-/** Extra options for `list`. */
+/** Extra options for `get` and `stream`. */
+export interface ReadOptions {
+  /** Object version to read (drivers with versioning: S3, GCS). */
+  readonly versionId?: string;
+  /** Partial read: byte offset and length. */
+  readonly range?: ByteRange;
+  /** Abort the download. */
+  readonly signal?: AbortSignal;
+  /** Provider-native download options. */
+  readonly native?: NativeOptions;
+}
+
+/** Extra options for `delete`. */
+export interface DeleteOptions {
+  readonly versionId?: string;
+  readonly signal?: AbortSignal;
+  readonly native?: NativeOptions;
+}
+
+/** Extra options for `exists` and `size`. */
+export interface StatOptions {
+  readonly versionId?: string;
+  readonly signal?: AbortSignal;
+  readonly native?: NativeOptions;
+}
+
+/** Extra options for `list` / `listPage`. */
 export interface ListOptions {
   /**
-   * Maximum number of entries returned. Defaults to 100, capped at 1000.
-   * Listing is bounded by design: entries beyond the limit are dropped and
-   * there is no pagination — narrow the prefix instead.
+   * Maximum number of entries returned per page. Defaults to 100, capped at
+   * 1000 — listing is always bounded.
    */
   readonly limit?: number;
+  /** Opaque continuation token from a previous {@link ListPage}. */
+  readonly cursor?: string;
+  /** Walk every nested prefix instead of one level (default: true for `list`). */
+  readonly recursive?: boolean;
+  readonly signal?: AbortSignal;
+  readonly native?: NativeOptions;
+}
+
+/** One page of a bounded listing. */
+export interface ListPage {
+  /** Disk-relative paths, lexicographically sorted. */
+  readonly files: readonly string[];
+  /** Pass back as `options.cursor` to continue; absent when exhausted. */
+  readonly cursor?: string;
+  readonly hasMore: boolean;
+}
+
+/** Extra options for `copy`. */
+export interface CopyOptions {
+  /** `false` fails when the destination exists (default: overwrite). */
+  readonly overwrite?: boolean;
+  readonly contentType?: string;
+  readonly metadata?: Readonly<Record<string, string>>;
+  readonly cacheControl?: string;
+  readonly contentDisposition?: string;
+  readonly contentEncoding?: string;
+  readonly signal?: AbortSignal;
+  readonly native?: NativeOptions;
+}
+
+/** Extra options for `move`. */
+export interface MoveOptions {
+  readonly overwrite?: boolean;
+  readonly contentType?: string;
+  readonly metadata?: Readonly<Record<string, string>>;
+  readonly signal?: AbortSignal;
+  readonly native?: NativeOptions;
+}
+
+/** What a signed URL may be used for (S3 presigner verbs). */
+export type SignedUrlAction = 'read' | 'write' | 'delete';
+
+/** Extra options for `signedUrl`. */
+export interface SignedUrlOptions {
+  /** Defaults to `read`. */
+  readonly action?: SignedUrlAction;
+  /** Seconds until expiry (default 3600, capped at 7 days by the kit). */
+  readonly expiresIn?: number;
+  readonly signal?: AbortSignal;
+  readonly native?: NativeOptions;
 }
 
 /** Metadata about a stored file (returned alongside content by `get`). */
@@ -73,28 +189,41 @@ export interface StorageDisk {
   readonly capabilities: DiskCapabilities;
   put(path: string, data: string | Uint8Array, options?: PutOptions): Promise<void>;
   /** Reads content bytes plus metadata (size, lastModified, contentType). */
-  get(path: string): Promise<StoredFile>;
+  get(path: string, options?: ReadOptions): Promise<StoredFile>;
   /**
    * Streaming read; prefer over `get` for large files. The stream is a web
    * `ReadableStream` that also supports `for await` iteration (the runtimes
    * this framework targets iterate web streams natively).
    */
-  stream(path: string): Promise<ReadableStream<Uint8Array> & AsyncIterable<Uint8Array>>;
+  stream(path: string, options?: ReadOptions): Promise<ReadableStream<Uint8Array> & AsyncIterable<Uint8Array>>;
   /** Removes the file; deleting a missing path is a no-op. */
-  delete(path: string): Promise<void>;
-  exists(path: string): Promise<boolean>;
-  size(path: string): Promise<number>;
+  delete(path: string, options?: DeleteOptions): Promise<void>;
+  exists(path: string, options?: StatOptions): Promise<boolean>;
+  size(path: string, options?: StatOptions): Promise<number>;
   /** Bounded recursive listing under `prefix` (defaults to the disk root). */
   list(prefix?: string, options?: ListOptions): Promise<readonly string[]>;
-  move(from: string, to: string): Promise<void>;
-  copy(from: string, to: string): Promise<void>;
+  /** One page of a bounded listing, with a continuation cursor. */
+  listPage(prefix?: string, options?: ListOptions): Promise<ListPage>;
+  move(from: string, to: string, options?: MoveOptions): Promise<void>;
+  copy(from: string, to: string, options?: CopyOptions): Promise<void>;
   /**
    * Public URL for a path. Only public disks answer; private disks throw
    * `STORAGE_VISIBILITY_FORBIDDEN` — a private file never resolves to a URL.
    */
   publicUrl(path: string): string;
-  /** Throws `STORAGE_CAPABILITY_UNSUPPORTED` on drivers without signed access (local). */
-  signedUrl(path: string, ttlSeconds?: number): Promise<string>;
+  /**
+   * Signed URL for read/write/delete access. Accepts a bare TTL in seconds for
+   * backwards compatibility, or the full {@link SignedUrlOptions}.
+   * Throws `STORAGE_CAPABILITY_UNSUPPORTED` on drivers without signed access.
+   */
+  signedUrl(path: string, options?: SignedUrlOptions | number): Promise<string>;
+  /**
+   * The underlying storagekit client for this driver (S3Client, BlobServiceClient,
+   * …). `unknown` by design: the concrete type depends on the configured driver.
+   */
+  native(): unknown;
+  /** Escape hatch for SDK operations the framework does not wrap. */
+  nativeRequest<T>(fn: (client: unknown) => Promise<T>): Promise<T>;
 }
 
 /** Options for `LocalStorageDisk`. */
@@ -110,6 +239,8 @@ export interface LocalDiskOptions {
    * a private root is never served through a public URL.
    */
   readonly publicBaseUrl?: string;
+  /** Extra storagekit local-driver options (`permissions`, `createDirectories`, …). */
+  readonly options?: Readonly<Record<string, unknown>>;
 }
 
 /** Configuration entry for one disk. */
@@ -118,6 +249,12 @@ export interface LocalDiskConfig {
   readonly root: string;
   readonly visibility: Visibility;
   readonly publicBaseUrl?: string;
+  /**
+   * Extra storagekit local-driver options (`baseUrl`, `prefix`, `permissions`,
+   * `createDirectories`, `followSymlinks`, …). `root` is owned by the framework
+   * and cannot be overridden here.
+   */
+  readonly options?: Readonly<Record<string, unknown>>;
 }
 
 /**

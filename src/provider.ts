@@ -19,6 +19,8 @@ export const localDiskSchema = z.object({
   root: z.string().min(1),
   visibility: z.enum(['private', 'public']),
   publicBaseUrl: z.string().min(1).optional(),
+  /** Extra storagekit local-driver options (`permissions`, `createDirectories`, …). */
+  options: z.record(z.string(), z.unknown()).optional(),
 });
 
 /**
@@ -149,6 +151,7 @@ export function createStorageProvider<TConfig extends { readonly storage: Storag
                 root: disk.config.root,
                 visibility: disk.config.visibility,
                 ...(disk.config.publicBaseUrl !== undefined ? { publicBaseUrl: disk.config.publicBaseUrl } : {}),
+                ...(disk.config.options !== undefined ? { options: disk.config.options } : {}),
               })
             : new KitDriverDisk({
                 name,

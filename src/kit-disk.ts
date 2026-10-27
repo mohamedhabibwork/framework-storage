@@ -4,10 +4,17 @@ import { StorageError } from './errors';
 import { createKitStorage, type KitFileStat, type KitStorage, mapKitError, rethrowMapped } from './kit';
 import { validateStoragePath } from './path-guard';
 import type {
+  CopyOptions,
+  DeleteOptions,
   DiskCapabilities,
   ListOptions,
+  ListPage,
+  MoveOptions,
   PutOptions,
+  ReadOptions,
   RemoteDiskOptions,
+  SignedUrlOptions,
+  StatOptions,
   StorageDisk,
   StorageDriverName,
   StoredFile,
@@ -101,14 +108,26 @@ export abstract class KitBackedDisk implements StorageDisk {
     }
     const key = this.guard(path);
     const kit = await this.kit();
-    await kit.upload(key, data).catch(rethrowMapped);
+    await kit
+      .upload(key, data, {
+        ...(options.contentType !== undefined ? { contentType: options.contentType } : {}),
+        ...(options.metadata !== undefined ? { metadata: { ...options.metadata } } : {}),
+        ...(options.cacheControl !== undefined ? { cacheControl: options.cacheControl } : {}),
+        ...(options.contentDisposition !== undefined ? { contentDisposition: options.contentDisposition } : {}),
+        ...(options.contentEncoding !== undefined ? { contentEncoding: options.contentEncoding } : {}),
+        ...(options.overwrite !== undefined ? { overwrite: options.overwrite } : {}),
+        ...(options.multipart !== undefined ? { multipart: { ...options.multipart } } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.native !== undefined ? { native: options.native } : {}),
+      })
+      .catch(rethrowMapped);
   }
 
-  async get(path: string): Promise<StoredFile> {
+  async get(path: string, options: ReadOptions = {}): Promise<StoredFile> {
     const key = this.guard(path);
-    const metadata = await this.#requireStat(key);
+    const metadata = await this.#requireStat(key, options);
     const kit = await this.kit();
-    const downloaded = await kit.download(key).catch(rethrowMapped);
+    const downloaded = await kit.download(key, this.downloadOptions(options)).catch(rethrowMapped);
     const content = await downloaded.buffer().catch(rethrowMapped);
     return {
       path: validateStoragePath(path),
@@ -119,26 +138,35 @@ export abstract class KitBackedDisk implements StorageDisk {
     };
   }
 
-  async stream(path: string): Promise<ReadableStream<Uint8Array> & AsyncIterable<Uint8Array>> {
+  async stream(
+    path: string,
+    options: ReadOptions = {},
+  ): Promise<ReadableStream<Uint8Array> & AsyncIterable<Uint8Array>> {
     const key = this.guard(path);
-    await this.#requireStat(key);
+    await this.#requireStat(key, options);
     const kit = await this.kit();
-    const downloaded = await kit.download(key).catch(rethrowMapped);
+    const downloaded = await kit.download(key, this.downloadOptions(options)).catch(rethrowMapped);
     // storagekit hands back a Node readable; `toWeb` returns a stream that is
     // both a web ReadableStream and `for await`-able at runtime.
     return Readable.toWeb(downloaded.stream) as unknown as ReadableStream<Uint8Array> & AsyncIterable<Uint8Array>;
   }
 
-  async delete(path: string): Promise<void> {
+  async delete(path: string, options: DeleteOptions = {}): Promise<void> {
     const key = this.guard(path);
     const kit = await this.kit();
-    await kit.delete(key).catch(rethrowMapped);
+    await kit
+      .delete(key, {
+        ...(options.versionId !== undefined ? { versionId: options.versionId } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.native !== undefined ? { native: options.native } : {}),
+      })
+      .catch(rethrowMapped);
   }
 
-  async exists(path: string): Promise<boolean> {
+  async exists(path: string, options: StatOptions = {}): Promise<boolean> {
     const key = this.guard(path);
     try {
-      await this.#requireStat(key);
+      await this.#requireStat(key, options);
       return true;
     } catch (error) {
       if (error instanceof StorageError && error.code === 'STORAGE_FILE_NOT_FOUND') return false;
@@ -146,26 +174,23 @@ export abstract class KitBackedDisk implements StorageDisk {
     }
   }
 
-  async size(path: string): Promise<number> {
+  async size(path: string, options: StatOptions = {}): Promise<number> {
     const key = this.guard(path);
-    return (await this.#requireStat(key)).size;
+    return (await this.#requireStat(key, options)).size;
   }
 
   async list(prefix = '', options: ListOptions = {}): Promise<readonly string[]> {
-    const limit = options.limit ?? DEFAULT_LIST_LIMIT;
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
-      throw new StorageError(
-        'STORAGE_LIST_LIMIT_INVALID',
-        `list limit must be an integer in [1, ${MAX_LIST_LIMIT}], got ${limit}`,
-      );
-    }
-    const normalizedPrefix = prefix.length > 0 ? `${this.guard(prefix.replace(/\/+$/, ''))}/` : '';
+    const limit = this.#listLimit(options.limit);
+    const normalizedPrefix = this.#listPrefix(prefix);
     const kit = await this.kit();
     const matches: string[] = [];
     try {
       // storagekit walks recursively and yields files only; stop at the bound
       // and restore the contract's lexicographic order.
-      for await (const entry of kit.iterate(normalizedPrefix)) {
+      for await (const entry of kit.iterate(normalizedPrefix, {
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.native !== undefined ? { native: options.native } : {}),
+      })) {
         matches.push(entry.path);
         if (matches.length >= limit) break;
       }
@@ -175,20 +200,66 @@ export abstract class KitBackedDisk implements StorageDisk {
     return matches.sort();
   }
 
-  async move(from: string, to: string): Promise<void> {
-    const fromKey = this.guard(from);
-    const toKey = this.guard(to);
-    await this.#requireStat(fromKey);
+  /**
+   * One bounded page plus the kit's continuation cursor. Unlike `list`, which
+   * walks until it has `limit` entries, this maps straight onto the driver's
+   * pagination — use it for large prefixes where cursor paging beats
+   * "narrow the prefix".
+   */
+  async listPage(prefix = '', options: ListOptions = {}): Promise<ListPage> {
+    const limit = this.#listLimit(options.limit);
+    const normalizedPrefix = this.#listPrefix(prefix);
     const kit = await this.kit();
-    await kit.move(fromKey, toKey).catch(rethrowMapped);
+    const page = await kit
+      .list({
+        prefix: normalizedPrefix,
+        limit,
+        recursive: options.recursive ?? true,
+        ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.native !== undefined ? { native: options.native } : {}),
+      })
+      .catch(rethrowMapped);
+    return {
+      files: page.files.map((file) => file.path).sort(),
+      hasMore: page.hasMore,
+      ...(page.cursor !== undefined ? { cursor: page.cursor } : {}),
+    };
   }
 
-  async copy(from: string, to: string): Promise<void> {
+  async move(from: string, to: string, options: MoveOptions = {}): Promise<void> {
     const fromKey = this.guard(from);
     const toKey = this.guard(to);
     await this.#requireStat(fromKey);
     const kit = await this.kit();
-    await kit.copy(fromKey, toKey).catch(rethrowMapped);
+    await kit
+      .move(fromKey, toKey, {
+        ...(options.overwrite !== undefined ? { overwrite: options.overwrite } : {}),
+        ...(options.contentType !== undefined ? { contentType: options.contentType } : {}),
+        ...(options.metadata !== undefined ? { metadata: { ...options.metadata } } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.native !== undefined ? { native: options.native } : {}),
+      })
+      .catch(rethrowMapped);
+  }
+
+  async copy(from: string, to: string, options: CopyOptions = {}): Promise<void> {
+    const fromKey = this.guard(from);
+    const toKey = this.guard(to);
+    await this.#requireStat(fromKey);
+    const kit = await this.kit();
+    await kit
+      .copy(fromKey, toKey, {
+        ...(options.overwrite !== undefined ? { overwrite: options.overwrite } : {}),
+        ...(options.contentType !== undefined ? { contentType: options.contentType } : {}),
+        ...(options.metadata !== undefined ? { metadata: { ...options.metadata } } : {}),
+        ...(options.cacheControl !== undefined ? { cacheControl: options.cacheControl } : {}),
+        ...(options.contentDisposition !== undefined ? { contentDisposition: options.contentDisposition } : {}),
+        ...(options.contentEncoding !== undefined ? { contentEncoding: options.contentEncoding } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.native !== undefined ? { native: options.native } : {}),
+      })
+      .catch(rethrowMapped);
   }
 
   publicUrl(path: string): string {
@@ -201,22 +272,78 @@ export abstract class KitBackedDisk implements StorageDisk {
     return `${this.#publicBaseUrl}/${this.guard(path)}`;
   }
 
-  async signedUrl(path: string, ttlSeconds?: number): Promise<string> {
+  async signedUrl(path: string, options: SignedUrlOptions | number = {}): Promise<string> {
     if (!this.capabilities.signedUrls) {
       throw new StorageError(
         'STORAGE_CAPABILITY_UNSUPPORTED',
         `Disk "${this.name}" (driver ${this.driver}) does not support signed URLs`,
       );
     }
+    const normalized: SignedUrlOptions = typeof options === 'number' ? { expiresIn: options } : options;
     const key = this.guard(path);
     const kit = await this.kit();
-    return kit.getSignedUrl(key, ttlSeconds === undefined ? {} : { expiresIn: ttlSeconds }).catch(rethrowMapped);
+    return kit
+      .getSignedUrl(key, {
+        ...(normalized.action !== undefined ? { action: normalized.action } : {}),
+        ...(normalized.expiresIn !== undefined ? { expiresIn: normalized.expiresIn } : {}),
+        ...(normalized.signal !== undefined ? { signal: normalized.signal } : {}),
+        ...(normalized.native !== undefined ? { native: normalized.native } : {}),
+      })
+      .catch(rethrowMapped);
+  }
+
+  /**
+   * The driver's native SDK client. Only valid for kit-backed drivers; the
+   * framework's own guard rails (path validation, error mapping) do not apply
+   * to operations issued directly on it.
+   */
+  async native(): Promise<unknown> {
+    return (await this.kit()).native();
+  }
+
+  /** Runs `fn` against the native client, mapping kit errors like every other call. */
+  async nativeRequest<T>(fn: (client: unknown) => Promise<T>): Promise<T> {
+    const kit = await this.kit();
+    return kit.nativeRequest<T>(fn).catch(rethrowMapped);
+  }
+
+  /** Validates and normalizes a list bound (1..MAX_LIST_LIMIT, default 100). */
+  #listLimit(limit: number | undefined): number {
+    const value = limit ?? DEFAULT_LIST_LIMIT;
+    if (!Number.isInteger(value) || value < 1 || value > MAX_LIST_LIMIT) {
+      throw new StorageError(
+        'STORAGE_LIST_LIMIT_INVALID',
+        `list limit must be an integer in [1, ${MAX_LIST_LIMIT}], got ${value}`,
+      );
+    }
+    return value;
+  }
+
+  /** Guards a listing prefix and normalizes the trailing slash. */
+  #listPrefix(prefix: string): string {
+    return prefix.length > 0 ? `${this.guard(prefix.replace(/\/+$/, ''))}/` : '';
+  }
+
+  /** Maps {@link ReadOptions} onto storagekit's download options. */
+  downloadOptions(options: ReadOptions): Record<string, unknown> {
+    return {
+      ...(options.versionId !== undefined ? { versionId: options.versionId } : {}),
+      ...(options.range !== undefined ? { range: { ...options.range } } : {}),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(options.native !== undefined ? { native: options.native } : {}),
+    };
   }
 
   /** Stats a guarded key, mapping kit errors and refusing paths that are not files. */
-  async #requireStat(key: string): Promise<KitFileStat> {
+  async #requireStat(key: string, options: StatOptions = {}): Promise<KitFileStat> {
     const kit = await this.kit();
-    const metadata = await kit.stat(key, { native: this.statNativeOptions() }).catch(rethrowMapped);
+    const metadata = await kit
+      .stat(key, {
+        native: { ...this.statNativeOptions(), ...(options.native ?? {}) },
+        ...(options.versionId !== undefined ? { versionId: options.versionId } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      })
+      .catch(rethrowMapped);
     const stats = (metadata.native as { stats?: { isFile(): boolean } } | undefined)?.stats;
     if (stats !== undefined && !stats.isFile()) {
       throw new StorageError('STORAGE_FILE_NOT_FOUND', `Storage path is not a file: ${JSON.stringify(key)}`);

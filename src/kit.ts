@@ -2,6 +2,7 @@ import {
   createStorage,
   type FileStat,
   type Storage,
+  StorageConflictError,
   StorageInvalidConfigError,
   StorageInvalidPathError,
   StorageNotFoundError,
@@ -59,6 +60,9 @@ export function mapKitError(error: unknown): unknown {
   if (error instanceof StorageError) return error;
   if (error instanceof StorageNotFoundError) {
     return new StorageError('STORAGE_FILE_NOT_FOUND', error.message, { cause: error });
+  }
+  if (error instanceof StorageConflictError) {
+    return new StorageError('STORAGE_FILE_EXISTS', error.message, { cause: error });
   }
   if (error instanceof StorageInvalidPathError) {
     return new StorageError('STORAGE_PATH_FORBIDDEN', error.message, { cause: error });

@@ -28,11 +28,22 @@ export {
 export { pruneTemp } from './temp';
 // Grouped conventions: every type in ./types.
 export type {
+  ByteRange,
+  CopyOptions,
+  DeleteOptions,
   DiskCapabilities,
   ListOptions,
+  ListPage,
   LocalDiskConfig,
   LocalDiskOptions,
+  MoveOptions,
+  MultipartOptions,
+  NativeOptions,
   PutOptions,
+  ReadOptions,
+  SignedUrlAction,
+  SignedUrlOptions,
+  StatOptions,
   RemoteDiskConfig,
   RemoteDiskOptions,
   StorageConfig,

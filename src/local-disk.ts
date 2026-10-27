@@ -25,6 +25,8 @@ export class LocalStorageDisk extends KitBackedDisk {
   override readonly capabilities: DiskCapabilities = { streaming: true, signedUrls: false };
   /** Absolute filesystem root; every path resolution is checked against it. */
   readonly root: string;
+  /** Extra storagekit local-driver options (root stays framework-owned). */
+  readonly #extra: Readonly<Record<string, unknown>>;
 
   constructor(options: LocalDiskOptions) {
     if (typeof options.root !== 'string' || options.root.trim().length === 0) {
@@ -32,13 +34,14 @@ export class LocalStorageDisk extends KitBackedDisk {
     }
     super({ name: options.name, visibility: options.visibility, publicBaseUrl: options.publicBaseUrl });
     this.root = resolve(options.root);
+    this.#extra = options.options ?? {};
   }
 
   protected override kitOptions(): Record<string, unknown> {
     // storagekit local options (see `LocalStorageConfig`): root is required,
     // baseUrl powers nothing the framework uses (publicUrl stays synchronous
     // and framework-owned) but keeps kit-side `getUrl` working for tooling.
-    const options: Record<string, unknown> = { root: this.root };
+    const options: Record<string, unknown> = { ...this.#extra, root: this.root };
     const baseUrl = this.publicBaseUrl;
     if (baseUrl !== undefined) options.baseUrl = baseUrl;
     return options;
