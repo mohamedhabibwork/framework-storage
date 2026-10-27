@@ -14,7 +14,7 @@ const DISK_NAME = /^[a-zA-Z0-9._-]+$/;
  * here in full. storagekit re-validates the kit-side options when the engine
  * instance is created.
  */
-const localDiskSchema = z.object({
+export const localDiskSchema = z.object({
   driver: z.literal('local'),
   root: z.string().min(1),
   visibility: z.enum(['private', 'public']),
@@ -28,11 +28,20 @@ const localDiskSchema = z.object({
  * missing kit options — including an uninstalled peer SDK — fail with
  * `STORAGE_DRIVER_UNAVAILABLE`).
  */
-const remoteDiskSchema = z.object({
+export const remoteDiskSchema = z.object({
   driver: z.string().min(1),
   visibility: z.enum(['private', 'public']).default('private'),
   publicBaseUrl: z.string().min(1).optional(),
   options: z.record(z.string(), z.unknown()).optional(),
+});
+
+/** Schema for one `storage.disks` entry (`local` or remote storagekit driver). */
+export const storageDiskConfigSchema = z.union([localDiskSchema, remoteDiskSchema]);
+
+/** Validated shape of the application's `storage` configuration section. */
+export const storageConfigSchema = z.object({
+  default: z.string().min(1).default('local'),
+  disks: z.record(z.string(), storageDiskConfigSchema),
 });
 
 function zodIssues(label: string, error: z.ZodError): string[] {

@@ -3,11 +3,13 @@ import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Application, BootError, ConfigError } from '@framework/core';
-import { STORAGE, storageDiskToken } from '../src/constants';
+import { registerStorageDriver, unregisterStorageDriver } from '@mohamedhabibwork/storagekit';
+import { FakeStorageDriver } from '@mohamedhabibwork/storagekit/testing/fake';
+import { STORAGE, STORAGE_DRIVER_NAMES, storageDiskToken } from '../src/constants';
 import { StorageError } from '../src/errors';
 import { LocalStorageDisk } from '../src/local-disk';
 import { resolveInsideRoot, validateStoragePath } from '../src/path-guard';
-import { createStorageProvider } from '../src/provider';
+import { createStorageProvider, storageConfigSchema } from '../src/provider';
 import { pruneTemp } from '../src/temp';
 import type { StorageConfig } from '../src/types';
 import { assertUploadAllowed } from '../src/upload-guard';
@@ -341,5 +343,44 @@ describe('provider', () => {
     const cause = (failure as BootError).cause;
     expect(cause).toBeInstanceOf(StorageError);
     expect((cause as StorageError).code).toBe('STORAGE_DRIVER_UNAVAILABLE');
+  });
+
+  test('KitDriverDisk round-trips files, streams, and signed URLs through a storagekit driver', async () => {
+    registerStorageDriver('fake', (config) => new FakeStorageDriver(config as never));
+    try {
+      const parsed = storageConfigSchema.parse({
+        default: 'cloud',
+        disks: {
+          cloud: {
+            driver: 'fake',
+            visibility: 'public',
+            publicBaseUrl: 'https://cdn.example.test',
+            options: { baseUrl: 'https://signed.example.test', signedUrls: true },
+          },
+        },
+      });
+      const application = new Application<{ storage: StorageConfig }>({
+        config: { storage: parsed as StorageConfig },
+        providers: [createStorageProvider()],
+      });
+      await application.boot();
+      try {
+        const disk = application.container.resolve(STORAGE);
+        expect(disk.driver).toBe('fake');
+        expect(disk.capabilities).toEqual({ streaming: true, signedUrls: true });
+        await disk.put('avatars/ada.txt', 'hello storagekit');
+        expect(await disk.exists('avatars/ada.txt')).toBe(true);
+        const file = await disk.get('avatars/ada.txt');
+        expect(new TextDecoder().decode(file.content)).toBe('hello storagekit');
+        expect(disk.publicUrl('avatars/ada.txt')).toBe('https://cdn.example.test/avatars/ada.txt');
+        const signed = await disk.signedUrl('avatars/ada.txt', 300);
+        expect(signed).toContain('avatars/ada.txt');
+        expect(STORAGE_DRIVER_NAMES).toEqual(['local', 's3', 'r2', 'minio', 'azure', 'gcs', 'oracle', 'rustfs']);
+      } finally {
+        await application.shutdown();
+      }
+    } finally {
+      unregisterStorageDriver('fake');
+    }
   });
 });

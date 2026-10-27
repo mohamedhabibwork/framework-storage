@@ -4,6 +4,9 @@ import type { StorageDisk } from './types';
 /** The application's default storage disk (config `storage.default`). */
 export const STORAGE = token<StorageDisk>('storage.disk');
 
+/** Built-in storage driver names shipped by `@mohamedhabibwork/storagekit`. */
+export const STORAGE_DRIVER_NAMES = ['local', 's3', 'r2', 'minio', 'azure', 'gcs', 'oracle', 'rustfs'] as const;
+
 /** Characters allowed in a disk name (kept in sync with the token name below). */
 const DISK_NAME = /^[a-zA-Z0-9._-]+$/;
 
