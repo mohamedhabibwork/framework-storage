@@ -1,21 +1,29 @@
 {
   "name": "@framework/storage",
   "version": "0.2.0",
-  "description": "Disk storage manager and local/S3 drivers backed by @mohamedhabibwork/storagekit.",
   "private": true,
-  "license": "MIT",
-  "type": "module",
+  "description": "Disk storage manager and local/S3 drivers backed by @mohamedhabibwork/storagekit.",
   "homepage": "https://github.com/mohamedhabibwork/framework-storage#readme",
+  "bugs": {
+    "url": "https://github.com/mohamedhabibwork/framework/issues"
+  },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mohamedhabibwork/framework.git",
     "directory": "packages/storage"
   },
-  "bugs": {
-    "url": "https://github.com/mohamedhabibwork/framework/issues"
-  },
+  "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "@framework/core": "workspace:*",
