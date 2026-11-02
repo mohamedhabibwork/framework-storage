@@ -177,16 +177,15 @@ describe('configuration', () => {
   });
 
   test('a remote disk forwards its options bag to the driver factory', async () => {
-    // No cloud SDK is installed in this workspace: the disk must fail with the
-    // catalogued "driver unavailable" code (proving the options reached the
-    // kit) rather than a config error.
+    // The bag has no bucket, which only the kit's s3 driver checks: failing with the
+    // catalogued "driver unavailable" code proves the options reached it.
     const config: StorageConfig = {
       default: 's3',
       disks: {
         s3: {
           driver: 's3',
           visibility: 'private',
-          options: { bucket: 'assets', region: 'eu-central-1', prefix: 'uploads/' },
+          options: { region: 'eu-central-1', prefix: 'uploads/' },
         },
       },
     };
