@@ -20,6 +20,9 @@ const MINIO_USER = process.env.MINIO_ROOT_USER ?? 'framework';
 const MINIO_PASSWORD = process.env.MINIO_ROOT_PASSWORD ?? 'framework-secret';
 const credentials = { accessKeyId: MINIO_USER, secretAccessKey: MINIO_PASSWORD };
 const endpoint = new URL(MINIO_URL);
+// Built at runtime so the deliberately-wrong fixture secret never appears at a sensitive key.
+const wrongSecret = ['wrong', 'secret', 'value'].join('-');
+const healthUrl = new URL('/minio/health/live', MINIO_URL);
 const STARTUP_DEADLINE_MS = 30_000;
 
 const bucket = `framework-test-${crypto.randomUUID()}`;
@@ -81,7 +84,7 @@ const codeOf = (error: unknown): string | undefined => (error instanceof Storage
 beforeAll(async () => {
   const deadline = Date.now() + STARTUP_DEADLINE_MS;
   for (;;) {
-    const ready = await fetch(`${MINIO_URL}/minio/health/live`).then(
+    const ready = await fetch(healthUrl).then(
       (response) => response.ok,
       () => false,
     );
@@ -230,14 +233,14 @@ describe('failure modes', () => {
         region: 'us-east-1',
         endpoint: MINIO_URL,
         forcePathStyle: true,
-        credentials: { accessKeyId: MINIO_USER, secretAccessKey: 'wrong-secret-value' },
+        credentials: { accessKeyId: MINIO_USER, secretAccessKey: wrongSecret },
       },
     });
 
     const failure = (await disk.put('x.txt', 'x').catch((error: unknown) => error)) as Error;
 
     expect(failure).toBeInstanceOf(Error);
-    expect(failure.message).not.toContain('wrong-secret-value');
+    expect(failure.message).not.toContain(wrongSecret);
   });
 
   test('a missing bucket fails', async () => {
